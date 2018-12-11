@@ -5,6 +5,10 @@
 package mil.nga.giat.data.elasticsearch;
 
 import org.apache.http.HttpHost;
+import org.apache.http.auth.AuthScope;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.CredentialsProvider;
+import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.apache.http.impl.nio.client.HttpAsyncClientBuilder;
 import org.apache.http.ssl.SSLContextBuilder;
 import org.elasticsearch.client.RestClient;
@@ -13,6 +17,7 @@ import org.geotools.data.DataStore;
 import org.geotools.data.DataStoreFactorySpi;
 
 import mil.nga.giat.data.elasticsearch.ElasticDataStore.ArrayEncoding;
+import org.geotools.data.Parameter;
 
 import java.awt.RenderingHints.Key;
 import java.io.IOException;
@@ -21,6 +26,7 @@ import java.io.UncheckedIOException;
 import java.security.KeyManagementException;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
+import java.util.Collections;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -36,8 +42,17 @@ public class ElasticDataStoreFactory implements DataStoreFactorySpi {
             "Host(s) with optional HTTP scheme and port.", false, "localhost");
 
     /** Cluster client port. **/
-    public static final Param HOSTPORT = new Param("elasticsearch_port", Integer.class, 
+    public static final Param HOSTPORT = new Param("elasticsearch_port", Integer.class,
             "Default HTTP port. Ignored if the host includes the port.", false, 9200);
+
+    /** UserName for Elasticsearch login*/
+    public static final Param USER = new Param("user", String.class,
+            "UserName for Elasticsearch authentication.", false, null);
+
+    /** UserName for Elasticsearch login*/
+    public static final Param PASSWD = new Param( "passwd", String.class,
+            "Password used to login to Elasticsearch.",false, null,
+                    Collections.singletonMap(Parameter.IS_PASSWORD, Boolean.TRUE));
 
     public static final Param SSL_ENABLED = new Param("ssl_enabled", Boolean.class,
             "Use https instead of http scheme. Ignored if the host includes the HTTP scheme.", false, false);
@@ -58,17 +73,19 @@ public class ElasticDataStoreFactory implements DataStoreFactorySpi {
 
     public static final Param SCROLL_TIME_SECONDS = new Param("scroll_time", Integer.class, "Time to keep the scroll open in seconds (ignored if scroll_enabled=false)", false, 120);
 
-    public static final Param ARRAY_ENCODING = new Param("array_encoding", String.class, "Array encoding strategy. Allowed values are \"JSON\" (keep arrays) " 
+    public static final Param ARRAY_ENCODING = new Param("array_encoding", String.class, "Array encoding strategy. Allowed values are \"JSON\" (keep arrays) "
             + " and \"CSV\" (URL encode and join array elements).", false, "JSON");
 
     public static final Param GRID_SIZE = new Param("grid_size", Long.class, "Hint for Geohash grid size (nrow*ncol)", false, 10000l);
 
-    public static final Param GRID_THRESHOLD = new Param("grid_threshold",  Double.class, 
+    public static final Param GRID_THRESHOLD = new Param("grid_threshold",  Double.class,
             "Geohash grid aggregation precision will be the minimum necessary to satisfy actual_grid_size/grid_size>grid_threshold", false, 0.05);
 
     protected static final Param[] PARAMS = {
             HOSTNAME,
             HOSTPORT,
+            USER,
+            PASSWD,
             SSL_ENABLED,
             SSL_REJECT_UNAUTHORIZED,
             INDEX_NAME,
@@ -148,8 +165,11 @@ public class ElasticDataStoreFactory implements DataStoreFactorySpi {
     protected RestClient createRestClient(Map<String, Serializable> params) throws IOException {
         final String[] hosts = ((String) getValue(HOSTNAME, params)).split(",");
         final Integer defaultPort = (Integer) getValue(HOSTPORT, params);
+        final String user = (String) getValue(USER, params);
+        final String passwd = (String) getValue(PASSWD, params);
         Boolean sslEnabled = (Boolean) getValue(SSL_ENABLED, params);
         final Boolean sslRejectUnauthorized = (Boolean) getValue(SSL_REJECT_UNAUTHORIZED, params);
+        final Boolean hasUserLogin = !user.isEmpty();
 
         final String defaultScheme = sslEnabled ? "https" : "http";
         final Pattern pattern = Pattern.compile("(?<scheme>https?)?(://)?(?<host>[^:]+):?(?<port>\\d+)?");
@@ -169,22 +189,46 @@ public class ElasticDataStoreFactory implements DataStoreFactorySpi {
 
         final RestClientBuilder builder = RestClient.builder(httpHosts);
 
-        if (sslEnabled) {
+        if (sslEnabled || hasUserLogin) {
             builder.setHttpClientConfigCallback(new RestClientBuilder.HttpClientConfigCallback() {
+                private CredentialsProvider credentialsProvider = null;
+                private Boolean sslEnabled = false;
+
+                private RestClientBuilder.HttpClientConfigCallback init(Boolean sslEnabled){
+                    this.sslEnabled = sslEnabled;
+                    if (hasUserLogin) {
+                        this.credentialsProvider = new BasicCredentialsProvider();
+                        this.credentialsProvider.setCredentials(
+                                AuthScope.ANY,
+                                new UsernamePasswordCredentials(user, passwd)
+                        );
+                    }
+                    return this;
+                }
+
                 @Override
                 public HttpAsyncClientBuilder customizeHttpClient(HttpAsyncClientBuilder httpClientBuilder) {
                     httpClientBuilder.useSystemProperties();
-                    if (!sslRejectUnauthorized) {
-                        httpClientBuilder.setSSLHostnameVerifier((host,session) -> true);
-                        try {
-                            httpClientBuilder.setSSLContext(SSLContextBuilder.create().loadTrustMaterial((chain,authType) -> true).build());
-                        } catch (KeyManagementException | NoSuchAlgorithmException | KeyStoreException e) {
-                            throw new UncheckedIOException(new IOException("Unable to create SSLContext", e));
+
+                    if(this.sslEnabled) {
+                        if (!sslRejectUnauthorized) {
+                            httpClientBuilder.setSSLHostnameVerifier((host, session) -> true);
+                            try {
+                                httpClientBuilder.setSSLContext(SSLContextBuilder.create().loadTrustMaterial((chain, authType) -> true).build());
+                            } catch (KeyManagementException | NoSuchAlgorithmException | KeyStoreException e) {
+                                throw new UncheckedIOException(new IOException("Unable to create SSLContext", e));
+                            }
                         }
                     }
+
+                    if(hasUserLogin){
+                        httpClientBuilder.setDefaultCredentialsProvider(this.credentialsProvider);
+                    }
+
                     return httpClientBuilder;
                 }
-            });
+
+            }.init(sslEnabled) );
         }
 
         return builder.build();
