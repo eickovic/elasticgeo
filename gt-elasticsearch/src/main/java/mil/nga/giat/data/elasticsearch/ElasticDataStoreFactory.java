@@ -169,7 +169,7 @@ public class ElasticDataStoreFactory implements DataStoreFactorySpi {
         final String passwd = (String) getValue(PASSWD, params);
         Boolean sslEnabled = (Boolean) getValue(SSL_ENABLED, params);
         final Boolean sslRejectUnauthorized = (Boolean) getValue(SSL_REJECT_UNAUTHORIZED, params);
-        final Boolean hasUserLogin = !user.isEmpty();
+        final Boolean hasUserLogin = null != user && !user.isEmpty();
 
         final String defaultScheme = sslEnabled ? "https" : "http";
         final Pattern pattern = Pattern.compile("(?<scheme>https?)?(://)?(?<host>[^:]+):?(?<port>\\d+)?");
